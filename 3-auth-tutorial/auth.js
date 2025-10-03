@@ -3,16 +3,40 @@ import bcrypt from 'bcryptjs';
 import express from 'express';
 import prisma from './prisma.js';
 import { Prisma } from '@prisma/client';
+import crypto from 'crypto';
 
 const router = express.Router();
 
 const signToken = (user) => {
     return jwt.sign(
-        { sub: user.id, email: user.email },
+        { user_id: user.id, email: user.email },
         process.env.JWT_KEY,
         { expiresIn: 900 }
     )
 };
+
+const getNewRefreshToken = () => crypto.randomBytes(64).toString('hex');
+
+const hashToken = (token) => crypto.createHash('sha256').update(token).digest('hex');
+
+const refreshExpiryDate = () => {
+    const delta = Number(process.env.REFRESH_EXPIRY_DAYS || 30);
+    const d = new Date();
+    d.setDate(d.getDate() + delta);
+    return d;
+}
+
+const setRefreshCookie = (res, token) => {
+    const days = Number(process.env.REFRESH_EXPIRY_DAYS || 30);
+    res.cookie('refreshToken', token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'prod',
+        sameSite: 'strict',
+        maxAge: days * 24 * 60 * 60 * 1000,
+        domain: process.env.COOKIE_DOMAIN || undefined,
+        path: '/auth'
+    });
+}
 
 const verifyTokenFromHeader = (req) => {
     const authHeader = req.headers.authorization || '';
@@ -39,17 +63,15 @@ router.post('/register', async (req, res) => {
             data: {email: email.toLowerCase(), password: hashed_password, name}
         });
 
-        const token = signToken(user)
-
         return res.status(201).json({
-            token,
+            // token,
             user: { id: user.id, email: user.email, name: user.name, createdAt: user.createdAt }
             });
     }
     catch(e) {
         if(e instanceof Prisma.PrismaClientKnownRequestError){
             if(e.code == 'P2002'){
-                return res.status(409).json({ error: `Unique constraint on: ${fields}` });
+                return res.status(409).json({ error: `Unique constraint failed on field(s): ${e.meta?.target?.join(', ')}` });
             }
         }
         console.error(e);
@@ -72,6 +94,25 @@ router.post('/login', async (req, res) => {
 
         const token = signToken(user);
 
+        const refreshToken = getNewRefreshToken();
+
+        console.log(refreshToken);
+
+        const tokenObj = await prisma.refreshToken.upsert({
+            where: { userId: user.id},
+            create: {
+                hashToken: hashToken(refreshToken),
+                userId: user.id,
+                expiresAt: refreshExpiryDate()
+            },
+            update: {
+                hashToken: hashToken(refreshToken),
+                expiresAt: refreshExpiryDate()
+            }
+        })
+
+        setRefreshCookie(res, refreshToken);
+
         return res.json({
             token,
             user: { id: user.id, email: user.email, name: user.name, createdAt: user.createdAt }
@@ -87,7 +128,7 @@ router.get('/me', async (req, res) => {
     try{
         const payload = verifyTokenFromHeader(req)
         const me = await prisma.user.findUnique({
-            where: {id: payload.sub},
+            where: {id: payload.user_id},
             select: { id: true, email: true, name: true, createdAt: true }
         })
         if (!me) return res.status(404).json({ error: 'User not found' });
