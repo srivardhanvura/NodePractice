@@ -19,15 +19,16 @@ model User {
   password  String
   name      String
   createdAt DateTime       @default(now())
-  token    RefreshToken?
+  token     RefreshToken[]
 }
 
 model RefreshToken {
-  id           Int           @id @default(autoincrement())
-  hashToken    String
-  userId       Int           @unique
-  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  expiresAt    DateTime
+  id        Int      @id @default(autoincrement())
+  hashToken String
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  rotatedAt DateTime?
 
   @@index([userId])
 }

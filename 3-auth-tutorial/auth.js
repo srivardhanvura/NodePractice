@@ -116,15 +116,10 @@ router.post("/login", async (req, res) => {
 
     const refreshToken = getNewRefreshToken();
 
-    const tokenObj = await prisma.refreshToken.upsert({
-      where: { userId: user.id },
-      create: {
+    const tokenObj = await prisma.refreshToken.create({
+      data: {
         hashToken: hashToken(refreshToken),
         userId: user.id,
-        expiresAt: refreshExpiryDate(),
-      },
-      update: {
-        hashToken: hashToken(refreshToken),
         expiresAt: refreshExpiryDate(),
       },
     });
@@ -146,11 +141,31 @@ router.post("/login", async (req, res) => {
   }
 });
 
+const handleReplayAttack = async (tokenObj) => {
+  const user_id = tokenObj.userId;
+  const date = new Date();
+
+  if (user_id === undefined) {
+    console.log("User ID not found");
+    return;
+  }
+
+  await prisma.refreshToken.updateMany({
+    where: { userId: user_id },
+    data: {
+      rotatedAt: date,
+    },
+  });
+};
+
 router.post("/refresh", async (req, res) => {
   try {
     const cookieValue = req.cookies?.refreshToken;
 
-    if (!cookieValue) return res.status(401).json({ error: "Missing refresh token" });
+    console.log(cookieValue);
+
+    if (!cookieValue)
+      return res.status(401).json({ error: "Missing refresh token" });
 
     const tokenObj = await prisma.refreshToken.findFirst({
       where: {
@@ -163,23 +178,43 @@ router.post("/refresh", async (req, res) => {
       return res.status(401).json({ error: "Invalid refresh token" });
     }
 
-    if (tokenObj.expiresAt < new Date()) {
+    console.log(tokenObj.rotatedAt);
+
+    if (tokenObj.rotatedAt !== null) {
+      clearCookie(res);
+      await handleReplayAttack(tokenObj);
+      return res.status(401).json({ error: "Replay attack" });
+    }
+
+    const d = new Date();
+    d.setMinutes(d.getMinutes() + 1);
+
+    if (tokenObj.expiresAt < d) {
       clearCookie(res);
       return res.status(401).json({ error: "Refresh token has expired" });
     }
 
     const newRefreshToken = getNewRefreshToken();
 
-    if(tokenObj.userId === undefined){
-        clearCookie(res);
-        return res.status(401).json({ error: "User ID not found against the refresh token" });
+    if (tokenObj.userId === undefined) {
+      clearCookie(res);
+      return res
+        .status(401)
+        .json({ error: "User ID not found against the refresh token" });
     }
 
-    const UpdatedTokenObj = await prisma.refreshToken.update({
-      where: { userId: tokenObj.userId },
+    await prisma.refreshToken.update({
+      where: { id: tokenObj.id },
+      data: {
+        rotatedAt: new Date(),
+      },
+    });
+
+    const UpdatedTokenObj = await prisma.refreshToken.create({
       data: {
         hashToken: hashToken(newRefreshToken),
         expiresAt: refreshExpiryDate(),
+        userId: tokenObj.userId,
       },
     });
 
@@ -207,6 +242,26 @@ router.get("/me", async (req, res) => {
     });
     if (!me) return res.status(404).json({ error: "User not found" });
     return res.json({ user: me });
+  } catch (e) {
+    return res.status(401).json({ error: e.message });
+  }
+});
+
+router.post("/logout", async (req, res) => {
+  try {
+    const payload = verifyTokenFromHeader(req);
+    const me = await prisma.user.findUnique({
+      where: { id: payload.user_id },
+      select: { id: true, email: true, name: true, createdAt: true },
+    });
+    if (!me) return res.status(404).json({ error: "User not found" });
+    
+    await prisma.refreshToken.updateMany({
+      where: { userId: payload.user_id },
+      data: { rotatedAt: new Date() },
+    });
+    clearCookie(res);
+    res.send({ message: "Logged out!" });
   } catch (e) {
     return res.status(401).json({ error: e.message });
   }
