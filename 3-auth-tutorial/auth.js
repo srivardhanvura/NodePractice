@@ -34,6 +34,16 @@ const setRefreshCookie = (res, token) => {
         sameSite: 'strict',
         maxAge: days * 24 * 60 * 60 * 1000,
         domain: process.env.COOKIE_DOMAIN || undefined,
+        path: '/auth/refresh'
+    });
+}
+
+const clearCookie = (res) => {
+    res.clearCookie('refreshToken', {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'prod',
+        sameSite: 'strict',
+        domain: process.env.COOKIE_DOMAIN || undefined,
         path: '/auth'
     });
 }
@@ -122,6 +132,53 @@ router.post('/login', async (req, res) => {
     return res.status(500).json({ error: 'Server error' });
   }
 })
+
+router.post('/refresh', async (req, res) => {
+    try {
+        const cookieValue = req.cookies?.refreshToken
+    
+        if(!cookieValue) res.status(401).json({error: 'Missing refresh token'});
+
+        const tokenObj = await prisma.refreshToken.findFirst({
+            where: {
+                hashToken: hashToken(cookieValue)
+            }
+        })
+
+        if(!tokenObj) {
+            clearCookie(res);
+            res.status(401).json({error: 'Invalid refresh token'});
+        }
+        
+        if(tokenObj.expiresAt < new Date()){
+            clearCookie(res);
+            res.status(401).json({error: 'Refresh token has expired'});
+        }
+
+        const newRefreshToken = getNewRefreshToken();
+
+        const UpdatedTokenObj = await prisma.refreshToken.update({
+                where: { userId: tokenObj.userId},
+                data: {
+                    hashToken: hashToken(newRefreshToken),
+                    expiresAt: refreshExpiryDate()
+                }
+            });
+        
+        setRefreshCookie(res, newRefreshToken);
+
+        const user = await prisma.user.findUnique({
+            where: {id: tokenObj.userId}
+        })
+
+        const jwt = signToken(user)
+        return res.json({jwt});
+    } catch(e) {
+        console.error(e);
+        clearCookie(res);
+        return res.status(500).json({ error: 'Server error' });
+    }
+});
 
 router.get('/me', async (req, res) => {
     
