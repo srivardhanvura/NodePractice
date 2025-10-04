@@ -31,7 +31,7 @@ const setRefreshCookie = (res, token) => {
   const days = Number(process.env.REFRESH_EXPIRY_DAYS || 30);
   res.cookie("refreshToken", token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "prod",
+    secure: process.env.NODE_ENV === "production",
     sameSite: "strict",
     maxAge: days * 24 * 60 * 60 * 1000,
     domain: process.env.COOKIE_DOMAIN || undefined,
@@ -42,19 +42,17 @@ const setRefreshCookie = (res, token) => {
 const clearCookie = (res) => {
   res.clearCookie("refreshToken", {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "prod",
+    secure: process.env.NODE_ENV === "production",
     sameSite: "strict",
     domain: process.env.COOKIE_DOMAIN || undefined,
-    path: "/auth",
+    path: "/auth/refresh",
   });
 };
 
 const verifyTokenFromHeader = (req) => {
   const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("JWT ") ? authHeader.slice(4) : null;
-
-  if (!token) throw new Error("Missing token");
-
+  const [scheme, token] = authHeader.split(" ");
+  if (scheme !== "Bearer" || !token) throw new Error("Missing token");
   try {
     return jwt.verify(token, process.env.JWT_KEY);
   } catch {
@@ -86,13 +84,11 @@ router.post("/register", async (req, res) => {
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError) {
       if (e.code == "P2002") {
-        return res
-          .status(409)
-          .json({
-            error: `Unique constraint failed on field(s): ${e.meta?.target?.join(
-              ", "
-            )}`,
-          });
+        return res.status(409).json({
+          error: `Unique constraint failed on field(s): ${e.meta?.target?.join(
+            ", "
+          )}`,
+        });
       }
     }
     console.error(e);
@@ -119,8 +115,6 @@ router.post("/login", async (req, res) => {
     const token = signToken(user);
 
     const refreshToken = getNewRefreshToken();
-
-    console.log(refreshToken);
 
     const tokenObj = await prisma.refreshToken.upsert({
       where: { userId: user.id },
@@ -156,7 +150,7 @@ router.post("/refresh", async (req, res) => {
   try {
     const cookieValue = req.cookies?.refreshToken;
 
-    if (!cookieValue) res.status(401).json({ error: "Missing refresh token" });
+    if (!cookieValue) return res.status(401).json({ error: "Missing refresh token" });
 
     const tokenObj = await prisma.refreshToken.findFirst({
       where: {
@@ -166,15 +160,20 @@ router.post("/refresh", async (req, res) => {
 
     if (!tokenObj) {
       clearCookie(res);
-      res.status(401).json({ error: "Invalid refresh token" });
+      return res.status(401).json({ error: "Invalid refresh token" });
     }
 
     if (tokenObj.expiresAt < new Date()) {
       clearCookie(res);
-      res.status(401).json({ error: "Refresh token has expired" });
+      return res.status(401).json({ error: "Refresh token has expired" });
     }
 
     const newRefreshToken = getNewRefreshToken();
+
+    if(tokenObj.userId === undefined){
+        clearCookie(res);
+        return res.status(401).json({ error: "User ID not found against the refresh token" });
+    }
 
     const UpdatedTokenObj = await prisma.refreshToken.update({
       where: { userId: tokenObj.userId },
@@ -190,8 +189,8 @@ router.post("/refresh", async (req, res) => {
       where: { id: tokenObj.userId },
     });
 
-    const jwt = signToken(user);
-    return res.json({ jwt });
+    const token = signToken(user);
+    return res.json({ token });
   } catch (e) {
     console.error(e);
     clearCookie(res);
